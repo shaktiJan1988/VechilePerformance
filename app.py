@@ -17,13 +17,12 @@ from dotenv import load_dotenv
 
 from agents.orchestrator import IIoTOrchestrator, OrchestratorContext
 from agents.pandas_agent import PandasAnalysisAgent
-from config import ALERT_MODEL_COL, PERF_MODEL_COL, PROFILE_MODEL_MAP
+from config import ALERT_MODEL_COL, PERF_MODEL_COL, PERF_PROFILE_COL, PROFILE_MODEL_MAP
 from tools.ml_model_tool import MLModelEntry, load_model_from_bytes
 from utils.data_processor import (
     filter_dataframes,
     generate_alerts_data,
     generate_performance_data,
-    get_valid_models,
     parse_feature_file,
 )
 
@@ -206,26 +205,34 @@ with tab1:
     col_profile, col_model = st.columns(2)
 
     with col_profile:
-        all_profiles = list(PROFILE_MODEL_MAP.keys())
+        _perf_data = st.session_state.performance_df
+        if PERF_PROFILE_COL in _perf_data.columns:
+            all_profiles = sorted(_perf_data[PERF_PROFILE_COL].dropna().unique().tolist())
+        else:
+            all_profiles = list(PROFILE_MODEL_MAP.keys())
         selected_profile = st.selectbox("Vehicle Profile", ["All Profiles"] + all_profiles)
         profile_val = None if selected_profile == "All Profiles" else selected_profile
 
     with col_model:
-        if profile_val:
-            valid_models = get_valid_models(profile_val, st.session_state.feature_files)
-            model_options = ["All Valid Models"] + valid_models
-            if not valid_models:
-                st.warning(
-                    f"No feature files uploaded for **{profile_val}** models yet.  \n"
-                    "Upload feature files in Tab 2 to enable model-level filtering."
+        _perf_data = st.session_state.performance_df
+        if PERF_MODEL_COL in _perf_data.columns:
+            if profile_val and PERF_PROFILE_COL in _perf_data.columns:
+                models_in_data = sorted(
+                    _perf_data[_perf_data[PERF_PROFILE_COL] == profile_val][PERF_MODEL_COL]
+                    .dropna().unique().tolist()
                 )
+            else:
+                models_in_data = sorted(_perf_data[PERF_MODEL_COL].dropna().unique().tolist())
         else:
-            valid_models = [
-                m
-                for p in all_profiles
-                for m in get_valid_models(p, st.session_state.feature_files)
-            ]
-            model_options = ["All Valid Models"] + valid_models
+            models_in_data = []
+
+        valid_models = [m for m in models_in_data if m in st.session_state.feature_files]
+        model_options = ["All Valid Models"] + valid_models
+        if not valid_models:
+            st.warning(
+                f"No feature files uploaded for {'**' + profile_val + '** ' if profile_val else ''}models yet.  \n"
+                "Upload feature files in Tab 2 to enable model-level filtering."
+            )
 
         # Key changes whenever valid_models changes → forces widget recreation
         model_select_key = "model_sel_" + "_".join(sorted(valid_models))
@@ -280,7 +287,15 @@ with tab1:
 
     st.divider()
 
-    # ── Chat history ──────────────────────────────────────────
+    # ── Chat history header + clear button ───────────────────
+    _ch_col1, _ch_col2 = st.columns([6, 1])
+    _ch_col1.subheader("Conversation")
+    if st.session_state.chat_history:
+        if _ch_col2.button("🗑️ Clear", help="Clear conversation history"):
+            st.session_state.chat_history = []
+            st.session_state.chat_figures = []
+            st.rerun()
+
     chat_container = st.container()
     with chat_container:
         for idx, msg in enumerate(st.session_state.chat_history):
@@ -384,24 +399,37 @@ with tab2:
         only after its feature file has been uploaded here._
         """
     )
-    # ── Sample feature file downloads ────────────────────────
-    with st.expander("⬇️ Download Sample Feature Files"):
-        st.caption("Use these as templates — upload them below to validate a model.")
-        import os as _os
-        _sample_dir = _os.path.join(_os.path.dirname(__file__), "sample_feature_files")
-        _sample_files = {
-            "JS220 (Excavator)": "JS220_features.csv",
-        }
-        for label, fname in _sample_files.items():
-            fpath = _os.path.join(_sample_dir, fname)
-            if _os.path.exists(fpath):
-                with open(fpath, "rb") as _f:
-                    st.download_button(
-                        f"📄 {label}",
-                        data=_f.read(),
-                        file_name=fname,
+    # ── Sample feature file downloads (generated from loaded data) ──
+    with st.expander("⬇️ Download Feature File Templates (all columns)"):
+        st.caption(
+            "One template per model — contains every column from the loaded dataset. "
+            "Edit to keep only the features you need, then upload below."
+        )
+        _perf_tmpl = st.session_state.performance_df
+        if _perf_tmpl is None:
+            st.info("Load data in the sidebar first to generate templates.")
+        else:
+            _all_cols = list(_perf_tmpl.columns) + [
+                c for c in st.session_state.alerts_df.columns
+                if c not in _perf_tmpl.columns
+            ]
+            _template_csv = pd.DataFrame(columns=_all_cols).to_csv(index=False).encode()
+            _tmpl_models = (
+                sorted(_perf_tmpl[PERF_MODEL_COL].dropna().unique().tolist())
+                if PERF_MODEL_COL in _perf_tmpl.columns else []
+            )
+            _cols_per_row = 4
+            for _i in range(0, len(_tmpl_models), _cols_per_row):
+                _row_models = _tmpl_models[_i:_i + _cols_per_row]
+                _btn_cols = st.columns(len(_row_models))
+                for _col, _m in zip(_btn_cols, _row_models):
+                    _col.download_button(
+                        f"📄 {_m}",
+                        data=_template_csv,
+                        file_name=f"{_m}_features.csv",
                         mime="text/csv",
-                        key=f"dl_{fname}",
+                        key=f"dl_tmpl_{_m}",
+                        use_container_width=True,
                     )
 
     st.divider()
@@ -410,7 +438,11 @@ with tab2:
     col_model_sel, col_uploader = st.columns([1, 2])
 
     with col_model_sel:
-        all_models_flat = [m for models in PROFILE_MODEL_MAP.values() for m in models]
+        _perf_tab2 = st.session_state.performance_df
+        if _perf_tab2 is not None and PERF_MODEL_COL in _perf_tab2.columns:
+            all_models_flat = sorted(_perf_tab2[PERF_MODEL_COL].dropna().unique().tolist())
+        else:
+            all_models_flat = [m for models in PROFILE_MODEL_MAP.values() for m in models]
         target_model = st.selectbox("Select Machine Model", all_models_flat, key="fe_model_sel")
 
     with col_uploader:
@@ -428,13 +460,51 @@ with tab2:
             st.write("**Detected columns:**")
             st.code(", ".join(columns))
 
-            if st.button(f"💾 Register Feature File for {target_model}", type="primary"):
-                st.session_state.feature_files[target_model] = {
-                    "columns": columns,
-                    "filename": feat_file.name,
-                }
-                st.success(f"Feature schema for **{target_model}** registered.")
-                st.rerun()
+            # Resolve which profile target_model belongs to (from loaded data)
+            _perf_tab2 = st.session_state.performance_df
+            _model_profile: str = ""
+            _profile_siblings: list[str] = []
+            if (
+                _perf_tab2 is not None
+                and PERF_MODEL_COL in _perf_tab2.columns
+                and PERF_PROFILE_COL in _perf_tab2.columns
+            ):
+                _m2p = dict(zip(_perf_tab2[PERF_MODEL_COL], _perf_tab2[PERF_PROFILE_COL]))
+                _model_profile = _m2p.get(target_model, "")
+                if _model_profile:
+                    _profile_siblings = sorted(
+                        _perf_tab2[_perf_tab2[PERF_PROFILE_COL] == _model_profile][PERF_MODEL_COL]
+                        .dropna().unique().tolist()
+                    )
+
+            reg_col1, reg_col2 = st.columns(2)
+            with reg_col1:
+                if st.button(f"💾 Register for {target_model}", type="primary", use_container_width=True):
+                    st.session_state.feature_files[target_model] = {
+                        "columns": columns,
+                        "filename": feat_file.name,
+                    }
+                    st.success(f"Feature schema for **{target_model}** registered.")
+                    st.rerun()
+            with reg_col2:
+                _profile_label = _model_profile or "same profile"
+                _siblings_count = len(_profile_siblings)
+                if _siblings_count > 1 and st.button(
+                    f"💾 Register for all {_profile_label} models ({_siblings_count})",
+                    type="secondary",
+                    use_container_width=True,
+                    help=f"Applies to: {', '.join(_profile_siblings)}",
+                ):
+                    for _sibling in _profile_siblings:
+                        st.session_state.feature_files[_sibling] = {
+                            "columns": columns,
+                            "filename": feat_file.name,
+                        }
+                    st.success(
+                        f"Feature schema registered for all **{_profile_label}** models: "
+                        + ", ".join(f"**{m}**" for m in _profile_siblings)
+                    )
+                    st.rerun()
         except Exception as e:
             st.error(f"Failed to parse file: {e}")
 
@@ -492,13 +562,50 @@ with tab2:
                 mime="text/csv",
             )
 
-            if st.button("✅ Register Selected Features", type="primary"):
-                st.session_state.feature_files[qc_model] = {
-                    "columns": selected_cols,
-                    "filename": f"{qc_model}_features.csv (quick-created)",
-                }
-                st.success(f"Feature schema for **{qc_model}** registered.")
-                st.rerun()
+            # Resolve profile siblings for quick-creator model
+            _qc_profile: str = ""
+            _qc_siblings: list[str] = []
+            _perf_qc = st.session_state.performance_df
+            if (
+                _perf_qc is not None
+                and PERF_MODEL_COL in _perf_qc.columns
+                and PERF_PROFILE_COL in _perf_qc.columns
+            ):
+                _qc_m2p = dict(zip(_perf_qc[PERF_MODEL_COL], _perf_qc[PERF_PROFILE_COL]))
+                _qc_profile = _qc_m2p.get(qc_model, "")
+                if _qc_profile:
+                    _qc_siblings = sorted(
+                        _perf_qc[_perf_qc[PERF_PROFILE_COL] == _qc_profile][PERF_MODEL_COL]
+                        .dropna().unique().tolist()
+                    )
+
+            qc_col1, qc_col2 = st.columns(2)
+            with qc_col1:
+                if st.button("✅ Register for Selected Model", type="primary", use_container_width=True):
+                    st.session_state.feature_files[qc_model] = {
+                        "columns": selected_cols,
+                        "filename": f"{qc_model}_features.csv (quick-created)",
+                    }
+                    st.success(f"Feature schema for **{qc_model}** registered.")
+                    st.rerun()
+            with qc_col2:
+                _qc_label = _qc_profile or "same profile"
+                if len(_qc_siblings) > 1 and st.button(
+                    f"✅ Register for all {_qc_label} models ({len(_qc_siblings)})",
+                    type="secondary",
+                    use_container_width=True,
+                    help=f"Applies to: {', '.join(_qc_siblings)}",
+                ):
+                    for _qs in _qc_siblings:
+                        st.session_state.feature_files[_qs] = {
+                            "columns": selected_cols,
+                            "filename": f"{_qs}_features.csv (quick-created)",
+                        }
+                    st.success(
+                        f"Feature schema registered for all **{_qc_label}** models: "
+                        + ", ".join(f"**{m}**" for m in _qc_siblings)
+                    )
+                    st.rerun()
     else:
         st.info("Load sample data first (sidebar) to use the Quick Creator.")
 
@@ -533,7 +640,11 @@ with tab3:
 
         col_target, col_desc = st.columns(2)
         with col_target:
-            all_models_flat2 = ["Any"] + [m for ms in PROFILE_MODEL_MAP.values() for m in ms]
+            _perf_tab3 = st.session_state.performance_df
+            if _perf_tab3 is not None and PERF_MODEL_COL in _perf_tab3.columns:
+                all_models_flat2 = ["Any"] + sorted(_perf_tab3[PERF_MODEL_COL].dropna().unique().tolist())
+            else:
+                all_models_flat2 = ["Any"] + [m for ms in PROFILE_MODEL_MAP.values() for m in ms]
             ml_target = st.selectbox("Target Vehicle Model", all_models_flat2)
         with col_desc:
             ml_desc = st.text_input("Description (optional)", placeholder="Brief description")
@@ -627,19 +738,24 @@ with tab3:
         test_model_name = st.selectbox(
             "Model to test", [e.name for e in st.session_state.ml_registry], key="test_ml"
         )
-        test_profile = st.selectbox(
-            "Profile filter", ["All"] + list(PROFILE_MODEL_MAP.keys()), key="test_prof"
-        )
-        test_model_filter = st.selectbox(
-            "Model filter",
-            ["All"]
-            + (
-                PROFILE_MODEL_MAP.get(test_profile, [])
-                if test_profile != "All"
-                else [m for ms in PROFILE_MODEL_MAP.values() for m in ms]
-            ),
-            key="test_mod_filter",
-        )
+        _perf_test = st.session_state.performance_df
+        if PERF_PROFILE_COL in _perf_test.columns:
+            _test_profiles = sorted(_perf_test[PERF_PROFILE_COL].dropna().unique().tolist())
+        else:
+            _test_profiles = list(PROFILE_MODEL_MAP.keys())
+        test_profile = st.selectbox("Profile filter", ["All"] + _test_profiles, key="test_prof")
+
+        if PERF_MODEL_COL in _perf_test.columns:
+            if test_profile != "All" and PERF_PROFILE_COL in _perf_test.columns:
+                _test_models = sorted(
+                    _perf_test[_perf_test[PERF_PROFILE_COL] == test_profile][PERF_MODEL_COL]
+                    .dropna().unique().tolist()
+                )
+            else:
+                _test_models = sorted(_perf_test[PERF_MODEL_COL].dropna().unique().tolist())
+        else:
+            _test_models = [m for ms in PROFILE_MODEL_MAP.values() for m in ms]
+        test_model_filter = st.selectbox("Model filter", ["All"] + _test_models, key="test_mod_filter")
 
         if st.button("▶️ Run Test", type="primary"):
             entry = next(e for e in st.session_state.ml_registry if e.name == test_model_name)
