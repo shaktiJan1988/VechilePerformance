@@ -435,12 +435,27 @@ with tab2:
     st.divider()
 
     # ── Upload section ────────────────────────────────────────
-    col_model_sel, col_uploader = st.columns([1, 2])
+    col_prof_sel, col_model_sel, col_uploader = st.columns([1, 1, 2])
+
+    _perf_tab2 = st.session_state.performance_df
+
+    with col_prof_sel:
+        if _perf_tab2 is not None and PERF_PROFILE_COL in _perf_tab2.columns:
+            _tab2_profiles = sorted(_perf_tab2[PERF_PROFILE_COL].dropna().unique().tolist())
+        else:
+            _tab2_profiles = list(PROFILE_MODEL_MAP.keys())
+        target_profile_t2 = st.selectbox("Select Profile", ["All Profiles"] + _tab2_profiles, key="fe_profile_sel")
+        _profile_filter_t2 = None if target_profile_t2 == "All Profiles" else target_profile_t2
 
     with col_model_sel:
-        _perf_tab2 = st.session_state.performance_df
         if _perf_tab2 is not None and PERF_MODEL_COL in _perf_tab2.columns:
-            all_models_flat = sorted(_perf_tab2[PERF_MODEL_COL].dropna().unique().tolist())
+            if _profile_filter_t2 and PERF_PROFILE_COL in _perf_tab2.columns:
+                all_models_flat = sorted(
+                    _perf_tab2[_perf_tab2[PERF_PROFILE_COL] == _profile_filter_t2][PERF_MODEL_COL]
+                    .dropna().unique().tolist()
+                )
+            else:
+                all_models_flat = sorted(_perf_tab2[PERF_MODEL_COL].dropna().unique().tolist())
         else:
             all_models_flat = [m for models in PROFILE_MODEL_MAP.values() for m in models]
         target_model = st.selectbox("Select Machine Model", all_models_flat, key="fe_model_sel")
